@@ -1,177 +1,175 @@
 package ServClient;
 
-import java.io.*;
-import java.net.*;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
+import java.io.*;
+import java.net.*;
 
-public class ChatClient {
-    private static final String SERVER_ADDRESS = "localhost";  // Adresse du serveur
-    private static final int SERVER_PORT = 12041; // Port du serveur
+public class ChatClient extends JFrame {
     private Socket socket;
-    private PrintWriter out;
-    private BufferedReader in;
-    private JFrame frame;
-    private JTextArea textArea;
-    private JTextField textField;
+    private BufferedReader input;
+    private PrintWriter output;
+    
+    // GUI Components
+    private JTextArea chatArea;
+    private JTextField messageField;
     private JButton sendButton;
-    private JButton sendFileButton;
-    private JButton disconnectButton;
-    private JFileChooser fileChooser;
+    private JButton fileButton;
+    
+    private String username;
 
-    // Constructeur pour initialiser l'interface graphique et se connecter au serveur
     public ChatClient() {
-        try {
-            // Connexion au serveur
-            socket = new Socket(SERVER_ADDRESS, SERVER_PORT);
-            out = new PrintWriter(socket.getOutputStream(), true);
-            in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-        } catch (IOException e) {
-            System.out.println("Erreur de connexion au serveur : " + e.getMessage());
-            return;
-        }
-
-        // Initialisation de l'interface graphique
-        frame = new JFrame("Client de Chat");
-        textArea = new JTextArea();
-        textArea.setEditable(false);
-        textArea.setLineWrap(true);
-        textArea.setWrapStyleWord(true);
-        textField = new JTextField();
-        sendButton = new JButton("Envoyer");
-        sendFileButton = new JButton("Envoyer un fichier");
-        disconnectButton = new JButton("Déconnexion");
-        fileChooser = new JFileChooser();
-
-        // Mise en place du layout de la fenêtre
-        frame.setLayout(new BorderLayout());
-        frame.add(new JScrollPane(textArea), BorderLayout.CENTER);
-        frame.add(textField, BorderLayout.SOUTH);
-
-        JPanel buttonPanel = new JPanel();
-        buttonPanel.setLayout(new FlowLayout());
+        // Setup GUI
+        setTitle("Network Chat Client");
+        setSize(500, 400);
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        
+        // Initialize components
+        chatArea = new JTextArea();
+        chatArea.setEditable(false);
+        JScrollPane scrollPane = new JScrollPane(chatArea);
+        
+        messageField = new JTextField();
+        sendButton = new JButton("Send");
+        fileButton = new JButton("Send File");
+        
+        // Layout
+        setLayout(new BorderLayout());
+        JPanel inputPanel = new JPanel(new BorderLayout());
+        inputPanel.add(messageField, BorderLayout.CENTER);
+        
+        JPanel buttonPanel = new JPanel(new FlowLayout());
         buttonPanel.add(sendButton);
-        buttonPanel.add(sendFileButton);
-        buttonPanel.add(disconnectButton);
-        frame.add(buttonPanel, BorderLayout.NORTH);
-
-        // Gestion des événements
+        buttonPanel.add(fileButton);
+        
+        inputPanel.add(buttonPanel, BorderLayout.EAST);
+        
+        add(scrollPane, BorderLayout.CENTER);
+        add(inputPanel, BorderLayout.SOUTH);
+        
+        // Event Listeners
         sendButton.addActionListener(e -> sendMessage());
-        sendFileButton.addActionListener(e -> sendFile());
-        disconnectButton.addActionListener(e -> disconnect());
-
-        // Fermer proprement le client lorsque la fenêtre est fermée
-        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setSize(500, 400);
-        frame.setVisible(true);
-
-        // Démarrer un thread pour écouter les messages entrants
-        new Thread(new IncomingMessageListener()).start();
+        fileButton.addActionListener(e -> sendFile());
+        messageField.addActionListener(e -> sendMessage());
+        
+        // Prompt for username
+        username = JOptionPane.showInputDialog("Entrez votre nom d'utilisateur :");
+        
+        // Connect to server
+        connectToServer();
     }
-
-    // Fonction pour envoyer un message texte
+    
+    private void connectToServer() {
+        try {
+            socket = new Socket("localhost", 4000);  // Port 4000 (same as server)
+            input = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            output = new PrintWriter(socket.getOutputStream(), true);
+            
+            // Send username
+            output.println(username);
+            
+            // Start message listener thread
+            new Thread(this::listenForMessages).start();
+        } catch (IOException e) {
+            JOptionPane.showMessageDialog(this, "Impossible de se connecter au serveur");
+            e.printStackTrace();
+        }
+    }
+    
     private void sendMessage() {
-        String message = textField.getText();
-        if (!message.isEmpty()) {
-            if (message.equalsIgnoreCase("EXIT")) {
-                out.println("EXIT");
-                disconnect();
-                return;
-            }
-            out.println("MESSAGE:" + message); // Préfixer pour indiquer qu'il s'agit d'un message texte
-            textArea.append("Moi: " + message + "\n");
-            textField.setText("");
+        String message = messageField.getText();
+        if (message.equalsIgnoreCase("exit")) {
+            output.println("exit");  // Send exit message to the server
+            System.exit(0);  // Close the application
+        } else if (!message.isEmpty()) {
+            output.println(username + ": " + message);  // Send regular message
+            messageField.setText("");  // Clear message field
+        } else {
+            JOptionPane.showMessageDialog(this, "Le message ne peut pas être vide.");
         }
     }
 
-    // Fonction pour envoyer un fichier
+    
     private void sendFile() {
-        int returnValue = fileChooser.showOpenDialog(frame);
-        if (returnValue == JFileChooser.APPROVE_OPTION) {
-            File file = fileChooser.getSelectedFile();
+        JFileChooser fileChooser = new JFileChooser();
+        int result = fileChooser.showOpenDialog(this);
+        
+        if (result == JFileChooser.APPROVE_OPTION) {
+            File selectedFile = fileChooser.getSelectedFile();
             try {
-                // Envoyer le nom du fichier au serveur pour indiquer qu'un fichier va suivre
-                out.println("FICHIER:" + file.getName()); // Préfixer pour indiquer qu'il s'agit d'un fichier
-
-                // Envoi du fichier au serveur
-                sendFileToServer(file);
-                textArea.append("Fichier envoyé: " + file.getName() + "\n");
-            } catch (IOException e) {
-                textArea.append("Erreur lors de l'envoi du fichier: " + e.getMessage() + "\n");
-            }
-        }
-    }
-
-    // Envoie un fichier au serveur via les flux de données
-    private void sendFileToServer(File file) throws IOException {
-        try (FileInputStream fileInputStream = new FileInputStream(file);
-             OutputStream outputStream = socket.getOutputStream()) {
-            byte[] buffer = new byte[4096];
-            int bytesRead;
-            while ((bytesRead = fileInputStream.read(buffer)) != -1) {
-                outputStream.write(buffer, 0, bytesRead);
-            }
-            outputStream.flush();
-        }
-    }
-
-    // Classe pour écouter les messages entrants
-    private class IncomingMessageListener implements Runnable {
-        @Override
-        public void run() {
-            try {
-                String message;
-                while ((message = in.readLine()) != null) {
-                    if (message.startsWith("MESSAGE:")) {
-                        textArea.append("Serveur: " + message.substring(8) + "\n");
-                    } else if (message.startsWith("FICHIER:")) {
-                        String fileName = message.substring(8);
-                        receiveFile(fileName);
-                    } else if (message.equalsIgnoreCase("EXIT")) {
-                        disconnect();
+                // Send file transfer command
+                output.println("FILE:" + selectedFile.getName() + ":" + selectedFile.length());
+                
+                // Send file content
+                try (FileInputStream fis = new FileInputStream(selectedFile)) {
+                    byte[] buffer = new byte[1024];
+                    int bytesRead;
+                    while ((bytesRead = fis.read(buffer)) != -1) {
+                        socket.getOutputStream().write(buffer, 0, bytesRead);
                     }
                 }
+                
+                chatArea.append("Fichier envoyé : " + selectedFile.getName() + "\n");
             } catch (IOException e) {
-                textArea.append("Erreur de communication avec le serveur\n");
+                JOptionPane.showMessageDialog(this, "Erreur lors de l'envoi du fichier");
+                e.printStackTrace();
             }
         }
     }
-
-    // Fonction pour recevoir un fichier et l'enregistrer localement
-    private void receiveFile(String fileName) {
-        JFileChooser saveFileChooser = new JFileChooser();
-        saveFileChooser.setSelectedFile(new File(fileName));
-        int returnValue = saveFileChooser.showSaveDialog(frame);
-        if (returnValue == JFileChooser.APPROVE_OPTION) {
-            File file = saveFileChooser.getSelectedFile();
-            try (InputStream inputStream = socket.getInputStream();
-                 FileOutputStream fileOutputStream = new FileOutputStream(file)) {
-                byte[] buffer = new byte[4096];
-                int bytesRead;
-                while ((bytesRead = inputStream.read(buffer)) != -1) {
-                    fileOutputStream.write(buffer, 0, bytesRead);
-                }
-                textArea.append("Fichier reçu et enregistré: " + file.getName() + "\n");
-            } catch (IOException e) {
-                textArea.append("Erreur lors de la réception du fichier: " + e.getMessage() + "\n");
-            }
-        }
-    }
-
-    // Fonction pour déconnecter le client
-    private void disconnect() {
+    
+    private void listenForMessages() {
         try {
-            socket.close();
-            textArea.append("Déconnexion du serveur...\n");
-            System.exit(0); // Ferme le programme
+            String message;
+            while ((message = input.readLine()) != null) {
+                final String finalMessage = message;
+                SwingUtilities.invokeLater(() -> {
+                    if (finalMessage.startsWith("FILE:")) {
+                        String[] parts = finalMessage.split(":");
+                        if (parts.length >= 3) {
+                            String fileName = parts[1];
+                            int fileSize = Integer.parseInt(parts[2]);
+                            receiveFile(fileName, fileSize);
+                        }
+                    } else {
+                        chatArea.append(finalMessage + "\n");
+                    }
+                });
+            }
         } catch (IOException e) {
-            textArea.append("Erreur lors de la déconnexion: " + e.getMessage() + "\n");
+            JOptionPane.showMessageDialog(this, "Connexion perdue");
+            e.printStackTrace();
         }
     }
-
-    // Méthode principale pour démarrer le client
+    
+    private void receiveFile(String fileName, int fileSize) {
+        try {
+            File downloadDir = new File("downloads");
+            if (!downloadDir.exists()) downloadDir.mkdir();
+            
+            File receivedFile = new File(downloadDir, fileName);
+            try (FileOutputStream fos = new FileOutputStream(receivedFile)) {
+                byte[] buffer = new byte[1024];
+                int bytesRead;
+                int totalBytesRead = 0;
+                
+                while (totalBytesRead < fileSize && 
+                       (bytesRead = socket.getInputStream().read(buffer)) != -1) {
+                    fos.write(buffer, 0, bytesRead);
+                    totalBytesRead += bytesRead;
+                }
+            }
+            
+            chatArea.append("Fichier reçu : " + fileName + "\n");
+        } catch (IOException e) {
+            JOptionPane.showMessageDialog(this, "Erreur lors de la réception du fichier");
+            e.printStackTrace();
+        }
+    }
+    
     public static void main(String[] args) {
-        new ChatClient();
+        SwingUtilities.invokeLater(() -> {
+            new ChatClient().setVisible(true);
+        });
     }
 }

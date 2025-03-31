@@ -2,159 +2,119 @@ package ServClient;
 
 import java.io.*;
 import java.net.*;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.*;
+import java.util.concurrent.*;
 
 public class ChatServer {
-    private static final int PORT = 12041; // Port d'écoute
-    private static Set<ClientHandler> clientHandlers = new HashSet<>(); // Set des handlers clients
+    private static final int PORT = 4000;  // Utilisation du même port
+    private static ConcurrentHashMap<String, ClientHandler> clients = new ConcurrentHashMap<>();
+    private static ExecutorService threadPool = Executors.newCachedThreadPool();
 
     public static void main(String[] args) {
-        System.out.println("Serveur démarré...");
         try (ServerSocket serverSocket = new ServerSocket(PORT)) {
+            System.out.println("Chat Server is running on port " + PORT);
+
             while (true) {
-                new ClientHandler(serverSocket.accept()).start(); 
-                // Accepte la connexion d'un client et crée un handler pour chaque client
+                Socket clientSocket = serverSocket.accept();
+                ClientHandler clientHandler = new ClientHandler(clientSocket);
+                threadPool.execute(clientHandler);
             }
         } catch (IOException e) {
-            System.err.println("Erreur du serveur: " + e.getMessage());
-            e.printStackTrace();
+            System.err.println("Server error: " + e.getMessage());
+        } finally {
+            threadPool.shutdown();
         }
     }
 
-    private static class ClientHandler extends Thread {
+    // Inner class to handle individual client connections
+    private static class ClientHandler implements Runnable {
         private Socket socket;
-        private PrintWriter out;
-        private BufferedReader in;
-        private String clientStatus = "En ligne"; // Par défaut
-        private OutputStream outputStream; // Flux pour envoyer des fichiers
+        private BufferedReader input;
+        private PrintWriter output;
+        private String username;
 
         public ClientHandler(Socket socket) {
             this.socket = socket;
         }
 
+        @Override
         public void run() {
             try {
-                in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-                out = new PrintWriter(socket.getOutputStream(), true);
-                outputStream = socket.getOutputStream(); // Flux de sortie pour envoyer des fichiers
+                // Setup input and output streams
+                input = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                output = new PrintWriter(socket.getOutputStream(), true);
 
-                synchronized (clientHandlers) {
-                    clientHandlers.add(this); // Ajoute le client à la liste des handlers
-                }
+                // Prompt for username
+                output.println("Enter your username:");
+                username = input.readLine();
+                clients.put(username, this);
+                broadcastMessage(username + " has joined the chat.");
 
+                // Handle client messages
                 String message;
-                while ((message = in.readLine()) != null) {
-                    if (message.startsWith("MESSAGE:")) {
-                        // Envoi d'un message texte
-                        handleMessage(message.substring(8)); // Enlève le préfixe "MESSAGE:"
-                    } else if (message.startsWith("FICHIER:")) {
-                        // Envoi d'un fichier
-                        handleFile(message.substring(8)); // Enlève le préfixe "FICHIER:"
-                    } else if (message.startsWith("STATUT:")) {
-                        // Mise à jour du statut de l'utilisateur
-                        handleStatus(message.substring(7)); // Enlève le préfixe "STATUT:"
-                    } else if (message.equalsIgnoreCase("exit")) {
-                        break; // Terminer la connexion si "exit"
+                while ((message = input.readLine()) != null) {
+                    if (message.equalsIgnoreCase("exit")) {
+                        break;  // If message is "exit", break the loop to close the connection
+                    }
+
+                    // Check for file transfer command
+                    if (message.startsWith("FILE:")) {
+                        handleFileTransfer(message);
+                    } else {
+                        broadcastMessage(username + ": " + message);
                     }
                 }
             } catch (IOException e) {
-                System.err.println("Erreur de communication avec le client: " + e.getMessage());
-                e.printStackTrace();
+                System.err.println("Error handling client " + username + ": " + e.getMessage());
             } finally {
-                // Fermeture des ressources et suppression du client de la liste
+                // Cleanup when client exits or when error occurs
+                if (username != null) {
+                    clients.remove(username);
+                    broadcastMessage(username + " has left the chat.");
+                }
                 try {
-                    if (socket != null) {
-                        socket.close();
-                    }
+                    socket.close();  // Close the socket to disconnect the client
                 } catch (IOException e) {
-                    System.err.println("Erreur de fermeture du socket: " + e.getMessage());
-                }
-
-                synchronized (clientHandlers) {
-                    clientHandlers.remove(this); // Retire le client de la liste
-                }
-
-                System.out.println("Client déconnecté");
-            }
-        }
-
-        // Gère l'envoi d'un message texte à tous les clients
-        private void handleMessage(String message) {
-            synchronized (clientHandlers) {
-                for (ClientHandler handler : clientHandlers) {
-                    if (handler != this) { // Ne pas envoyer à soi-même
-                        handler.out.println("MESSAGE: " + message); // Envoi à tous les autres clients
-                    }
+                    e.printStackTrace();
                 }
             }
         }
 
-        private void handleFile(String fileName) {
-            synchronized (clientHandlers) {
-                for (ClientHandler handler : clientHandlers) {
-                    if (handler != this) {
-                        handler.out.println("FICHIER:" + fileName); // Préfixe pour indiquer qu'un fichier va suivre
-                    }
-                }
-            }
-
-            // Réception et enregistrement du fichier
-            byte[] buffer = new byte[4096];
-            int bytesRead;
-            File file = new File(fileName); // Suppose que le fichier est dans le répertoire courant
-            try (FileOutputStream fileOutputStream = new FileOutputStream(file);
-                 InputStream inputStream = socket.getInputStream()) {
-
-                // Lecture des données binaires et écriture dans le fichier
-                while ((bytesRead = inputStream.read(buffer)) != -1) {
-                    fileOutputStream.write(buffer, 0, bytesRead);
-                }
-                fileOutputStream.flush();
-                System.out.println("Fichier reçu: " + fileName);
-            } catch (IOException e) {
-                System.err.println("Erreur lors de la réception du fichier: " + e.getMessage());
+        // Broadcast message to all connected clients
+        private void broadcastMessage(String message) {
+            for (ClientHandler client : clients.values()) {
+                client.output.println(message);
             }
         }
 
-        private void sendFileToClients(String fileName) {
-            synchronized (clientHandlers) {
-                byte[] buffer = new byte[4096];
-                int bytesRead;
-                File file = new File(fileName);
-                if (file.exists()) {
-                    try (FileInputStream fileInputStream = new FileInputStream(file)) {
-                        for (ClientHandler handler : clientHandlers) {
-                            if (handler != this) {
-                                handler.out.println("FICHIER:" + fileName); // Indique qu'un fichier va être envoyé
-                            }
-                        }
+        // Handle file transfer between clients
+        private void handleFileTransfer(String fileCommand) throws IOException {
+            // Parse file transfer details
+            String[] parts = fileCommand.split(":");
+            if (parts.length < 3) return;
 
-                        // Envoi du fichier à tous les clients
+            String fileName = parts[1];
+            int fileSize = Integer.parseInt(parts[2]);
+
+            // Create file receive buffer
+            byte[] buffer = new byte[1024];
+            InputStream fileInputStream = socket.getInputStream();
+            
+            // Broadcast file transfer to other clients
+            broadcastMessage(username + " is sending file: " + fileName);
+
+            // Broadcast file to all other clients
+            for (ClientHandler client : clients.values()) {
+                if (client != this) {
+                    // Send file transfer details
+                    client.output.println("FILE:" + fileName + ":" + fileSize);
+                    
+                    // Send actual file content
+                    try (FileOutputStream fos = new FileOutputStream(fileName)) {
+                        int bytesRead;
                         while ((bytesRead = fileInputStream.read(buffer)) != -1) {
-                            for (ClientHandler handler : clientHandlers) {
-                                if (handler != this) {
-                                    handler.outputStream.write(buffer, 0, bytesRead); // Envoi des données binaires
-                                }
-                            }
+                            fos.write(buffer, 0, bytesRead);
                         }
-                        System.out.println("Fichier envoyé: " + fileName);
-                    } catch (IOException e) {
-                        System.err.println("Erreur lors de l'envoi du fichier: " + e.getMessage());
-                    }
-                } else {
-                    System.out.println("Le fichier " + fileName + " n'existe pas.");
-                }
-            }
-        }
-
-        // Gère la mise à jour du statut de l'utilisateur
-        private void handleStatus(String status) {
-            this.clientStatus = status;
-            synchronized (clientHandlers) {
-                for (ClientHandler handler : clientHandlers) {
-                    if (handler != this) {
-                        handler.out.println("STATUT: " + clientStatus); // Envoie le statut aux autres
                     }
                 }
             }
